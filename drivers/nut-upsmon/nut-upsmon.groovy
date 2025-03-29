@@ -117,6 +117,10 @@ preferences {
     input name: "password", type: "password", title: "NUT password", required: true
     input name: "pollFreq", type: "number", title: "Polling Frequency", defaultValue: 5, range: "1..30", required: true,
         description: "<b>NB</b>: The Polling Frequency must be less than the <a href='https://networkupstools.org/docs/man/upsmon.conf.html' target='_blank'>HOSTSYNC</a> setting on the NUT server (default 15 seconds). If it is not, the NUT server may shut down before the hub knows that the UPS is on battery."
+	input name: "maxRetries", type: "number", title: "Max Connection Retries", defaultValue: 30, required: true,
+        description: "Maximum number of connection retries at defined polling frequency before going to fallback value"
+    input name: "fallbackFreq", type: "number", title: "Fallback Reconnection Frequency", defaultValue: 60, range: "30..3600", required: true,
+        description: "After Max Connection Retries is reached, use this frequency to attempt to reconnect to NUT server"
     input name: "shutdownEnable", title: "Enable Hub Shutdown", type: "bool", defaultValue: false,
         description: "<b>NB</b>: This option is required to enable automatic shutdown of the hub. If you do not enable this option, the driver will report UPS status, but will not initiate a hub shutdown even when the NUT server instructs it to do so."
     input name: "logEnable", title: "Enable debug logging", type: "bool", defaultValue: false
@@ -142,6 +146,7 @@ void updated() {
 void initialize() {
     unschedule()
     state.upsdConnected = false
+    state.connectionRetries = 0
     runIn(15, upsdConnect)
 }
 
@@ -157,6 +162,7 @@ void upsdConnect() {
     try {
         telnetConnect([termChars:[10]], serverHost, serverPort.toInteger(), null, null)
         state.upsdConnected = true
+        state.connectionRetries = 0
         log.info("connected to upsd on ${serverHost}:${serverPort} - monitoring ${upsName} every ${pollFreq} seconds")
 
         telnetSend("USERNAME ${username}")
@@ -169,7 +175,13 @@ void upsdConnect() {
     }
     catch (e) {
         log.error("telnet connect error: ${e}")
-        runIn(pollFreq, upsdConnect)
+        state.connectionRetries++
+        def nextAttemptIn = pollFreq
+        if (state.connectionRetries > maxRetries) {
+            log.warn("Connection to NUT server failed (attempt ${state.connectionRetries-1}) - retrying in $fallbackFreq seconds...")
+            nextAttemptIn = fallbackFreq
+        }
+        runIn(nextAttemptIn, upsdConnect)
     }
 }
 
@@ -349,17 +361,9 @@ void parse(String message) {
 }
 
 private void sendHubShutdownCommand() {
-    String cookie = null
-    if (security) {
-        cookie = getCookie()
-    }
-
     def postParams = [
         uri: "http://127.0.0.1:8080",
         path: "/hub/shutdown",
-        headers:[
-            "Cookie": cookie
-        ]
     ]
 
     log.warn("sending hub shutdown command...")
